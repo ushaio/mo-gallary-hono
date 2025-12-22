@@ -1,0 +1,14 @@
+-- AlterTable
+ALTER TABLE "Photo" ADD COLUMN "aperture" TEXT;
+ALTER TABLE "Photo" ADD COLUMN "cameraMake" TEXT;
+ALTER TABLE "Photo" ADD COLUMN "cameraModel" TEXT;
+ALTER TABLE "Photo" ADD COLUMN "exifRaw" TEXT;
+ALTER TABLE "Photo" ADD COLUMN "focalLength" TEXT;
+ALTER TABLE "Photo" ADD COLUMN "iso" INTEGER;
+ALTER TABLE "Photo" ADD COLUMN "latitude" REAL;
+ALTER TABLE "Photo" ADD COLUMN "lens" TEXT;
+ALTER TABLE "Photo" ADD COLUMN "longitude" REAL;
+ALTER TABLE "Photo" ADD COLUMN "orientation" INTEGER;
+ALTER TABLE "Photo" ADD COLUMN "shutterSpeed" TEXT;
+ALTER TABLE "Photo" ADD COLUMN "software" TEXT;
+ALTER TABLE "Photo" ADD COLUMN "takenAt" DATETIME;

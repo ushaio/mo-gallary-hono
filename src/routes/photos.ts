@@ -1,6 +1,7 @@
 import { Hono } from 'hono';
 import { prisma } from '../lib/prisma.js';
 import { authMiddleware, AuthVariables } from '../middleware/auth.js';
+import { extractExifData } from '../lib/exif.js';
 import sharp from 'sharp';
 import { writeFile, unlink, mkdir } from 'fs/promises';
 import { existsSync } from 'fs';
@@ -127,6 +128,9 @@ photos.post('/admin/photos', async (c) => {
     // Get metadata
     const metadata = await sharp(filepath).metadata();
 
+    // Extract EXIF data
+    const exifData = await extractExifData(buffer);
+
     // Generate thumbnail
     const thumbnailFilename = `thumb-${filename}`;
     const thumbnailPath = path.join(uploadsDir, thumbnailFilename);
@@ -166,7 +170,22 @@ photos.post('/admin/photos', async (c) => {
         storageKey: storagePath ? `${storagePath}/${filename}` : filename,
         width: metadata.width || 0,
         height: metadata.height || 0,
+        size: buffer.length,
         isFeatured: false,
+        // EXIF data
+        cameraMake: exifData.cameraMake,
+        cameraModel: exifData.cameraModel,
+        lens: exifData.lens,
+        focalLength: exifData.focalLength,
+        aperture: exifData.aperture,
+        shutterSpeed: exifData.shutterSpeed,
+        iso: exifData.iso,
+        takenAt: exifData.takenAt,
+        latitude: exifData.latitude,
+        longitude: exifData.longitude,
+        orientation: exifData.orientation,
+        software: exifData.software,
+        exifRaw: exifData.exifRaw,
         categories: {
           connectOrCreate: categoriesArray.map((name: string) => ({
             where: { name },
@@ -233,6 +252,33 @@ photos.delete('/admin/photos/:id', async (c) => {
     });
   } catch (error) {
     console.error('Delete photo error:', error);
+    return c.json({ error: 'Internal server error' }, 500);
+  }
+});
+
+photos.patch('/admin/photos/:id', async (c) => {
+  try {
+    const id = c.req.param('id');
+    const body = await c.req.json();
+    
+    const photo = await prisma.photo.update({
+      where: { id },
+      data: {
+        title: body.title,
+        isFeatured: body.isFeatured,
+      },
+      include: { categories: true }
+    });
+
+    return c.json({
+      success: true,
+      data: {
+        ...photo,
+        category: photo.categories.map((c) => c.name).join(','),
+      },
+    });
+  } catch (error) {
+    console.error('Update photo error:', error);
     return c.json({ error: 'Internal server error' }, 500);
   }
 });

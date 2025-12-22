@@ -25,8 +25,25 @@ model Photo {
   storageKey      String?
   width           Int
   height          Int
+  size            Int?
   isFeatured      Boolean    @default(false)
   createdAt       DateTime   @default(now())
+  
+  // EXIF Information
+  cameraMake      String?
+  cameraModel     String?
+  lens            String?
+  focalLength     String?
+  aperture        String?
+  shutterSpeed    String?
+  iso             Int?
+  takenAt         DateTime?
+  latitude        Float?
+  longitude       Float?
+  orientation     Int?
+  software        String?
+  exifRaw         String?
+
   categories      Category[]
 }
 
