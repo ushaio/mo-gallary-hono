@@ -2,8 +2,9 @@ import { Hono } from 'hono';
 import { prisma } from '../lib/prisma.js';
 import { authMiddleware, AuthVariables } from '../middleware/auth.js';
 import { extractExifData } from '../lib/exif.js';
+import { StorageProviderFactory, StorageConfig, StorageError } from '../lib/storage/index.js';
 import sharp from 'sharp';
-import { writeFile, unlink, mkdir } from 'fs/promises';
+import { unlink } from 'fs/promises';
 import { existsSync } from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -12,6 +13,53 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const photos = new Hono<{ Variables: AuthVariables }>();
+
+/**
+ * Build storage configuration from database settings
+ */
+async function getStorageConfig(
+  providerOverride?: string
+): Promise<StorageConfig> {
+  // Fetch all settings
+  const settings = await prisma.setting.findMany();
+  const settingsMap = Object.fromEntries(
+    settings.map((s) => [s.key, s.value])
+  );
+
+  const provider = (
+    providerOverride ||
+    settingsMap.storage_provider ||
+    'local'
+  ) as 'local' | 'github' | 'r2';
+
+  const config: StorageConfig = { provider };
+
+  switch (provider) {
+    case 'local':
+      config.localBasePath = path.join(process.cwd(), 'public', 'uploads');
+      config.localBaseUrl = '/uploads';
+      break;
+
+    case 'github':
+      config.githubToken = settingsMap.github_token;
+      config.githubRepo = settingsMap.github_repo;
+      config.githubPath = settingsMap.github_path || 'uploads';
+      config.githubBranch = settingsMap.github_branch || 'main';
+      config.githubAccessMethod = (settingsMap.github_access_method ||
+        'jsdelivr') as 'raw' | 'jsdelivr' | 'pages';
+      config.githubPagesUrl = settingsMap.github_pages_url;
+      break;
+
+    case 'r2':
+      config.r2AccessKeyId = settingsMap.r2_access_key_id;
+      config.r2SecretAccessKey = settingsMap.r2_secret_access_key;
+      config.r2Bucket = settingsMap.r2_bucket;
+      config.r2Endpoint = settingsMap.r2_endpoint;
+      break;
+  }
+
+  return config;
+}
 
 // Public endpoints
 photos.get('/photos', async (c) => {
@@ -105,11 +153,24 @@ photos.post('/admin/photos', async (c) => {
       return c.json({ error: 'File and title are required' }, 400);
     }
 
-    // Ensure uploads directory exists
-    const uploadsDir = path.join(process.cwd(), 'public', 'uploads');
-    if (!existsSync(uploadsDir)) {
-      await mkdir(uploadsDir, { recursive: true });
-    }
+    // Get storage configuration
+    const storageConfig = await getStorageConfig(storageProvider);
+
+    // Create storage provider instance
+    const storage = StorageProviderFactory.create(storageConfig);
+
+    // Validate provider
+    storage.validateConfig();
+
+    // Process image
+    const arrayBuffer = await file.arrayBuffer();
+    const buffer = Buffer.from(arrayBuffer);
+
+    // Extract EXIF data
+    const exifData = await extractExifData(buffer);
+
+    // Get metadata
+    const metadata = await sharp(buffer).metadata();
 
     // Generate random filename
     const randomName = Array(32)
@@ -118,39 +179,32 @@ photos.post('/admin/photos', async (c) => {
       .join('');
     const ext = path.extname(file.name);
     const filename = `${randomName}${ext}`;
-    const filepath = path.join(uploadsDir, filename);
-
-    // Save file
-    const arrayBuffer = await file.arrayBuffer();
-    const buffer = Buffer.from(arrayBuffer);
-    await writeFile(filepath, buffer);
-
-    // Get metadata
-    const metadata = await sharp(filepath).metadata();
-
-    // Extract EXIF data
-    const exifData = await extractExifData(buffer);
+    const thumbnailFilename = `thumb-${filename}`;
 
     // Generate thumbnail
-    const thumbnailFilename = `thumb-${filename}`;
-    const thumbnailPath = path.join(uploadsDir, thumbnailFilename);
-
-    await sharp(filepath)
+    const thumbnailBuffer = await sharp(buffer)
       .resize(800, 800, {
         fit: 'inside',
         withoutEnlargement: true,
       })
       .jpeg({ quality: 80 })
-      .toFile(thumbnailPath);
+      .toBuffer();
 
-    // Get default storage provider from settings if not provided
-    let finalProvider = storageProvider || 'local';
-    if (!storageProvider) {
-      const settings = await prisma.setting.findUnique({
-        where: { key: 'storage_provider' },
-      });
-      finalProvider = settings?.value || 'local';
-    }
+    // Upload via storage provider
+    const uploadResult = await storage.upload(
+      {
+        buffer,
+        filename,
+        path: storagePath,
+        contentType: file.type,
+      },
+      {
+        buffer: thumbnailBuffer,
+        filename: thumbnailFilename,
+        path: storagePath,
+        contentType: 'image/jpeg',
+      }
+    );
 
     // Split categories by comma and trim
     const categoriesArray = category
@@ -164,10 +218,10 @@ photos.post('/admin/photos', async (c) => {
     const photo = await prisma.photo.create({
       data: {
         title,
-        url: `/uploads/${filename}`,
-        thumbnailUrl: `/uploads/${thumbnailFilename}`,
-        storageProvider: finalProvider,
-        storageKey: storagePath ? `${storagePath}/${filename}` : filename,
+        url: uploadResult.url,
+        thumbnailUrl: uploadResult.thumbnailUrl,
+        storageProvider: storageConfig.provider,
+        storageKey: uploadResult.key,
         width: metadata.width || 0,
         height: metadata.height || 0,
         size: buffer.length,
@@ -205,6 +259,9 @@ photos.post('/admin/photos', async (c) => {
     });
   } catch (error) {
     console.error('Upload photo error:', error);
+    if (error instanceof StorageError) {
+      return c.json({ error: error.message }, 400);
+    }
     return c.json({ error: 'Internal server error' }, 500);
   }
 });
@@ -212,35 +269,34 @@ photos.post('/admin/photos', async (c) => {
 photos.delete('/admin/photos/:id', async (c) => {
   try {
     const id = c.req.param('id');
+    const deleteFromStorage = c.req.query('deleteFromStorage') === 'true';
 
     const photo = await prisma.photo.findUnique({
       where: { id },
     });
 
     if (photo) {
-      // Delete files from disk if provider is local
-      if (photo.storageProvider === 'local') {
-        const filePath = path.join(process.cwd(), 'public', photo.url);
-        if (existsSync(filePath)) {
-          await unlink(filePath);
-        }
+      // Only delete files from storage if user explicitly requested it
+      if (deleteFromStorage) {
+        // Get storage configuration for the provider used by this photo
+        const storageConfig = await getStorageConfig(photo.storageProvider);
 
-        if (photo.thumbnailUrl) {
-          const thumbnailPath = path.join(
-            process.cwd(),
-            'public',
-            photo.thumbnailUrl,
-          );
-          if (existsSync(thumbnailPath)) {
-            await unlink(thumbnailPath);
-          }
-        }
+        // Create storage provider instance
+        const storage = StorageProviderFactory.create(storageConfig);
+
+        // Delete files from storage
+        const thumbnailKey = photo.thumbnailUrl
+          ? photo.thumbnailUrl.split('/').pop()
+          : undefined;
+
+        await storage.delete(photo.storageKey || photo.url, thumbnailKey);
       } else {
         console.log(
-          `Photo ${id} is stored on ${photo.storageProvider}, skipping local file deletion`,
+          `Skipping file deletion for photo ${id} (deleteFromStorage=${deleteFromStorage})`
         );
       }
 
+      // Always delete photo record from database
       await prisma.photo.delete({
         where: { id },
       });

@@ -52,6 +52,9 @@ settings.get('/', async (c) => {
       github_token: '',
       github_repo: '',
       github_path: '',
+      github_branch: '',
+      github_access_method: '',
+      github_pages_url: '',
     };
 
     settingsList.forEach((s) => {
