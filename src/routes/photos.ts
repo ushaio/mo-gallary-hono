@@ -154,7 +154,7 @@ photos.post('/admin/photos', async (c) => {
     }
 
     // Get storage configuration
-    const storageConfig = await getStorageConfig(storageProvider);
+    const storageConfig = await getStorageConfig(storageProvider || undefined);
 
     // Create storage provider instance
     const storage = StorageProviderFactory.create(storageConfig);

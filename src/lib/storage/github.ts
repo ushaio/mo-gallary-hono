@@ -100,10 +100,10 @@ export class GithubStorageProvider implements StorageProvider {
       }
 
       return result;
-    } catch (error) {
+    } catch (error: any) {
       console.error('GitHub upload error:', error);
       throw new StorageError(
-        'Failed to upload to GitHub',
+        `Failed to upload to GitHub: ${error.message}`,
         'GITHUB_UPLOAD_FAILED',
         error
       );
@@ -148,7 +148,8 @@ export class GithubStorageProvider implements StorageProvider {
     const parts = [this.basePath];
     if (subfolder) parts.push(subfolder);
     parts.push(filename);
-    return parts.join('/').replace(/\/+/g, '/');
+    // Remove leading slashes and duplicate slashes
+    return parts.join('/').replace(/\/+/g, '/').replace(/^\/+/, '');
   }
 
   private async uploadToGithub(
@@ -168,26 +169,70 @@ export class GithubStorageProvider implements StorageProvider {
         ref: this.branch,
       });
 
-      if ('sha' in data) {
+      if (!Array.isArray(data) && 'sha' in data) {
         sha = data.sha;
       }
     } catch (error: any) {
       // File doesn't exist (404), that's fine
       if (error.status !== 404) {
+        console.error('GitHub getContent error:', error.response?.data || error.message);
         throw error;
       }
     }
 
     // Create or update file
-    await this.octokit.repos.createOrUpdateFileContents({
-      owner: this.owner,
-      repo: this.repo,
-      path,
-      message,
-      content,
-      branch: this.branch,
-      ...(sha && { sha }),
-    });
+    try {
+      await this.octokit.repos.createOrUpdateFileContents({
+        owner: this.owner,
+        repo: this.repo,
+        path,
+        message,
+        content,
+        branch: this.branch,
+        ...(sha && { sha }),
+      });
+    } catch (error: any) {
+       console.error('GitHub createOrUpdateFileContents error:', error.response?.data || error.message);
+       
+       const msg = error.response?.data?.message || error.message || '';
+       if (msg.includes('exists where') && msg.includes('subdirectory')) {
+         const conflict = await this.checkPathConflict(path);
+         if (conflict) {
+           throw new Error(
+             `The path '${conflict}' exists as a file in your GitHub repository, preventing directory creation. Please rename or delete this file on GitHub.`
+           );
+         }
+       }
+       throw error;
+    }
+  }
+
+  private async checkPathConflict(path: string): Promise<string | null> {
+    const parts = path.split('/');
+    // Check parts 0 to n-2 (parent directories)
+    let currentPath = '';
+    
+    // Iterate through all parent directories
+    for (let i = 0; i < parts.length - 1; i++) {
+        currentPath = currentPath ? `${currentPath}/${parts[i]}` : parts[i];
+        
+        try {
+            const { data } = await this.octokit.repos.getContent({
+                owner: this.owner,
+                repo: this.repo,
+                path: currentPath,
+                ref: this.branch,
+            });
+            
+            // If it returns an object (not array) and type is file, it's a conflict
+            if (!Array.isArray(data) && data.type === 'file') {
+                return currentPath;
+            }
+        } catch (e) {
+            // Ignore 404 or other errors during check
+        }
+    }
+    return null;
   }
 
   private async deleteFromGithub(path: string): Promise<void> {
